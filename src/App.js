@@ -1,1321 +1,532 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import * as recharts from "recharts";
+
+const { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = recharts;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  CONFIG
+//  CONFIG — change API_BASE to your backend URL
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const API_BASE = "http://localhost:8000";
+const API = "https://t8rtbqrp-8000.asse.devtunnels.ms";
 
-const AGENT_TYPES = {
-  SCRAPER: { id: "scraper", name: "Web Scraper", icon: "🕷️", color: "#10b981" },
-  SUMMARIZER: { id: "summarizer", name: "Summarizer", icon: "📝", color: "#6366f1" },
-  QA: { id: "qa", name: "Q&A Agent", icon: "💬", color: "#f59e0b" },
-  ROUTER: { id: "router", name: "Router", icon: "🔀", color: "#ec4899" },
+const AGENTS = {
+  SCRAPER:    { id:"scraper",    name:"Scraper",    icon:"◆", color:"#22d3ee" },
+  SUMMARIZER: { id:"summarizer", name:"Summarizer", icon:"◇", color:"#a78bfa" },
+  QA:         { id:"qa",         name:"Q&A",        icon:"●", color:"#fbbf24" },
+  ROUTER:     { id:"router",     name:"Router",     icon:"◈", color:"#f472b6" },
+  EXTRACTOR:  { id:"extractor",  name:"Extractor",  icon:"⬡", color:"#34d399" },
+  EXPORT:     { id:"export",     name:"Export",      icon:"▣", color:"#fb923c" },
 };
 
-const VECTOR_DBS = [
-  { id: "pinecone", name: "Pinecone", icon: "🌲" },
-  { id: "chroma", name: "ChromaDB", icon: "🎨" },
-  { id: "weaviate", name: "Weaviate", icon: "🔮" },
-  { id: "qdrant", name: "Qdrant", icon: "⚡" },
-];
+const ST = { IDLE:"idle", WORKING:"working" };
+const COLORS = ["#22d3ee","#a78bfa","#fbbf24","#f472b6","#34d399","#fb923c","#818cf8","#f87171"];
 
-const STATUS = {
-  IDLE: "idle",
-  SCRAPING: "scraping",
-  EMBEDDING: "embedding",
-  QUERYING: "querying",
-  THINKING: "thinking",
-  ERROR: "error",
+// ━━━  API  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const post = async (path, body) => {
+  const r = await fetch(`${API}${path}`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+  if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail||`Error ${r.status}`); }
+  return r.json();
 };
+const get = async (path) => { const r = await fetch(`${API}${path}`); if (!r.ok) throw new Error("Failed"); return r.json(); };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  API HELPERS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const apiChat      = (msg) => post("/chat",      { message: msg });
+const apiIngest    = (urls)=> post("/ingest",     { urls });
+const apiSummarize = (url) => post("/summarize",  { url });
+const apiExtract   = (type, query) => post("/extract", { extract_type: type, query });
+const apiHealth    = ()    => get("/health");
+const apiSources   = ()    => get("/sources");
+const apiExports   = ()    => get("/exports");
 
-async function apiChat(message) {
-  const res = await fetch(`${API_BASE}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Server error ${res.status}`);
-  }
-  return res.json(); // { response, intermediate_steps }
+// ━━━  CLIENT-SIDE CSV EXPORT  ━━━━━━━━━━━━━━━━━━
+
+function downloadCSV(data, filename = "export.csv") {
+  if (!data?.length) return;
+  const h = Object.keys(data[0]);
+  const rows = [h.join(","), ...data.map(r => h.map(k => `"${String(r[k]||'').replace(/"/g,'""')}"`).join(","))];
+  const blob = new Blob([rows.join("\n")], { type:"text/csv" });
+  Object.assign(document.createElement("a"), { href:URL.createObjectURL(blob), download:filename }).click();
 }
 
-async function apiIngest(urls) {
-  const res = await fetch(`${API_BASE}/ingest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Server error ${res.status}`);
-  }
-  return res.json(); // { status, detail }
+function downloadFromServer(filename) {
+  window.open(`${API}/exports/${filename}`, "_blank");
 }
 
-async function apiSummarize(url) {
-  const res = await fetch(`${API_BASE}/summarize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Server error ${res.status}`);
-  }
-  return res.json(); // { summary }
-}
+// ━━━  MAIN COMPONENT  ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async function apiHealth() {
-  const res = await fetch(`${API_BASE}/health`);
-  if (!res.ok) throw new Error("Backend unreachable");
-  return res.json();
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  COMPONENT
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-export default function MultiAgentRAGChatbot() {
-  const [activeTab, setActiveTab] = useState("chat");
+export default function RAGDashboard() {
+  const [view, setView] = useState("chat");
   const [urls, setUrls] = useState("");
   const [messages, setMessages] = useState([
-    {
-      role: "system",
-      content:
-        "Welcome! I'm your multi-agent RAG assistant. Add some URLs in the **Sources** tab, then ask me anything about those pages.",
-      agent: AGENT_TYPES.ROUTER,
-    },
+    { role:"system", content:"System ready. Paste URLs in INGEST to scrape content. Then ask questions or extract data (emails, phones, etc). Results can be exported as CSV/Excel.", agent:AGENTS.ROUTER, ts:Date.now() }
   ]);
   const [input, setInput] = useState("");
-  const [status, setStatus] = useState(STATUS.IDLE);
-  const [statusText, setStatusText] = useState("");
+  const [status, setStatus] = useState(ST.IDLE);
+  const [statusLabel, setStatusLabel] = useState("");
   const [indexedUrls, setIndexedUrls] = useState([]);
-  const [selectedVectorDb, setSelectedVectorDb] = useState("chroma");
-  const [agentLog, setAgentLog] = useState([]);
-  const [showArchitecture, setShowArchitecture] = useState(false);
-  const [chunkSize, setChunkSize] = useState(512);
-  const [chunkOverlap, setChunkOverlap] = useState(50);
-  const [embeddingModel, setEmbeddingModel] = useState("openai");
-  const [llmModel, setLlmModel] = useState("gpt-4");
-  const [backendStatus, setBackendStatus] = useState("unknown"); // unknown | online | offline
-  const chatEndRef = useRef(null);
-  const inputRef = useRef(null);
+  const [logs, setLogs] = useState([]);
+  const [backend, setBackend] = useState("unknown");
+  const [backendInfo, setBackendInfo] = useState({});
+  const [exportData, setExportData] = useState(null);    // latest extracted table
+  const [chartData, setChartData] = useState([]);
+  const [serverExports, setServerExports] = useState([]); // files on server
+  const chatEnd = useRef(null);
 
+  useEffect(() => { chatEnd.current?.scrollIntoView({ behavior:"smooth" }); }, [messages]);
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // Check backend health on mount
-  useEffect(() => {
-    apiHealth()
-      .then((data) => {
-        setBackendStatus("online");
-        if (data.vector_db) setSelectedVectorDb(data.vector_db);
-        if (data.llm_model) setLlmModel(data.llm_model);
-      })
-      .catch(() => setBackendStatus("offline"));
+    apiHealth().then(d => { setBackend("online"); setBackendInfo(d); }).catch(() => setBackend("offline"));
   }, []);
 
-  const addAgentLog = useCallback((agent, action, detail) => {
-    setAgentLog((prev) => [
-      ...prev,
-      { agent, action, detail, time: new Date().toLocaleTimeString() },
-    ]);
+  const log = useCallback((agent, action, detail) => {
+    setLogs(p => [...p, { agent, action, detail, time: new Date().toLocaleTimeString() }]);
   }, []);
 
-  // ── Ingest URLs via real API ──────────────────
-  const handleIngestUrls = async () => {
-    const parsed = urls
-      .split("\n")
-      .map((u) => u.trim())
-      .filter((u) => u.length > 0);
-    if (parsed.length === 0) return;
+  const refreshExports = () => apiExports().then(d => setServerExports(d.files||[])).catch(()=>{});
 
-    setStatus(STATUS.SCRAPING);
-    setStatusText("Sending URLs to backend...");
-    addAgentLog(AGENT_TYPES.SCRAPER, "Started", `Ingesting ${parsed.length} URL(s)`);
-
+  // ── INGEST ──
+  const handleIngest = async () => {
+    const list = urls.split("\n").map(u=>u.trim()).filter(Boolean);
+    if (!list.length) return;
+    setStatus(ST.WORKING); setStatusLabel(`Scraping ${list.length} URL(s)…`);
+    log(AGENTS.SCRAPER, "INGEST", `${list.length} URL(s)`);
     try {
-      const result = await apiIngest(parsed);
-
-      setIndexedUrls((prev) => [...prev, ...parsed]);
-      addAgentLog(AGENT_TYPES.SCRAPER, "Complete", result.detail);
+      const r = await apiIngest(list);
+      setIndexedUrls(p => [...p, ...list]);
+      log(AGENTS.SCRAPER, "DONE", r.detail);
+      setMessages(p => [...p, { role:"system", content:`✓ ${r.detail}`, agent:AGENTS.SCRAPER, ts:Date.now() }]);
       setUrls("");
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "system",
-          content: `✅ ${result.detail}`,
-          agent: AGENT_TYPES.SCRAPER,
-        },
-      ]);
-    } catch (err) {
-      addAgentLog(AGENT_TYPES.SCRAPER, "Error", err.message);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "system",
-          content: `❌ Ingestion failed: ${err.message}`,
-          agent: AGENT_TYPES.SCRAPER,
-        },
-      ]);
-    } finally {
-      setStatus(STATUS.IDLE);
-      setStatusText("");
+    } catch (e) {
+      log(AGENTS.SCRAPER, "ERROR", e.message);
+      setMessages(p => [...p, { role:"system", content:`✗ ${e.message}`, agent:AGENTS.SCRAPER, ts:Date.now() }]);
     }
+    setStatus(ST.IDLE); setStatusLabel("");
   };
 
-  // ── Send chat message via real API ────────────
+  // ── CHAT (routes through agent — will use extraction tools automatically) ──
   const handleSend = async () => {
     if (!input.trim()) return;
-    const userMsg = { role: "user", content: input.trim() };
-    setMessages((prev) => [...prev, userMsg]);
+    const msg = input.trim();
+    setMessages(p => [...p, { role:"user", content:msg, ts:Date.now() }]);
     setInput("");
-    setStatus(STATUS.THINKING);
-    setStatusText("Thinking...");
-
-    addAgentLog(AGENT_TYPES.ROUTER, "Routing", `Analyzing: "${userMsg.content.slice(0, 50)}..."`);
-
+    setStatus(ST.WORKING); setStatusLabel("Agent thinking…");
+    log(AGENTS.ROUTER, "ROUTE", `"${msg.slice(0,60)}"`);
     try {
-      const result = await apiChat(userMsg.content);
+      const r = await apiChat(msg);
+      // Log intermediate steps
+      r.intermediate_steps?.forEach(s => {
+        const a = s.tool==="web_scraper"?AGENTS.SCRAPER : s.tool==="page_summarizer"?AGENTS.SUMMARIZER
+          : s.tool==="contact_extractor"?AGENTS.EXTRACTOR : s.tool==="custom_data_extractor"?AGENTS.EXTRACTOR : AGENTS.QA;
+        log(a, s.tool, (s.input||'').slice(0,80));
+      });
 
-      // Log intermediate steps from the agent
-      if (result.intermediate_steps && result.intermediate_steps.length > 0) {
-        result.intermediate_steps.forEach((step) => {
-          const agent =
-            step.tool === "web_scraper"
-              ? AGENT_TYPES.SCRAPER
-              : step.tool === "page_summarizer"
-              ? AGENT_TYPES.SUMMARIZER
-              : AGENT_TYPES.QA;
+      const agentUsed = r.intermediate_steps?.length
+        ? (r.intermediate_steps.some(s => s.tool.includes("extractor")) ? AGENTS.EXTRACTOR : AGENTS.QA)
+        : AGENTS.QA;
 
-          addAgentLog(agent, `Tool: ${step.tool}`, `Input: ${step.input?.slice(0, 80)}...`);
+      setMessages(p => [...p, {
+        role:"assistant", content:r.response, agent:agentUsed, ts:Date.now(),
+        exportData: r.export_data || null,
+      }]);
+
+      // If export data came back, store it
+      if (r.export_data?.length) {
+        setExportData(r.export_data);
+        log(AGENTS.EXPORT, "DATA_READY", `${r.export_data.length} records`);
+        refreshExports();
+
+        // Build chart from export data
+        const typeCount = {};
+        r.export_data.forEach(row => {
+          const key = row.Type || row.type || Object.values(row)[0] || "Item";
+          typeCount[key] = (typeCount[key]||0) + 1;
         });
+        if (Object.keys(typeCount).length >= 1) {
+          setChartData(Object.entries(typeCount).map(([name,value])=>({name,value})));
+        }
       }
 
-      addAgentLog(AGENT_TYPES.QA, "Complete", "Response delivered");
-
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: result.response, agent: AGENT_TYPES.QA },
-      ]);
-    } catch (err) {
-      addAgentLog(AGENT_TYPES.ROUTER, "Error", err.message);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "system",
-          content: `❌ Error: ${err.message}\n\nMake sure the backend server is running on ${API_BASE}`,
-          agent: AGENT_TYPES.ROUTER,
-        },
-      ]);
-    } finally {
-      setStatus(STATUS.IDLE);
-      setStatusText("");
+      log(AGENTS.QA, "DONE", "Response delivered");
+    } catch (e) {
+      log(AGENTS.ROUTER, "ERROR", e.message);
+      setMessages(p => [...p, { role:"system", content:`✗ ${e.message}`, agent:AGENTS.ROUTER, ts:Date.now() }]);
     }
+    setStatus(ST.IDLE); setStatusLabel("");
   };
 
-  // ── Architecture Diagram ──────────────────────
-  const ArchitectureDiagram = () => (
-    <div
-      style={{
-        background: "var(--surface-1)",
-        border: "1px solid var(--border)",
-        borderRadius: 12,
-        padding: 24,
-        margin: "16px 0",
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 12,
-        lineHeight: 1.8,
-        color: "var(--text-secondary)",
-        overflowX: "auto",
-      }}
-    >
-      <pre style={{ margin: 0, whiteSpace: "pre" }}>{`
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                    MULTI-AGENT RAG SYSTEM                      │
-  ├─────────────────────────────────────────────────────────────────┤
-  │                                                                 │
-  │   ┌──────────┐    ┌──────────────┐    ┌───────────────────┐    │
-  │   │  React   │───▶│  FastAPI     │───▶│  Agent Router     │    │
-  │   │  Frontend│    │  /chat       │    │  (LangChain)      │    │
-  │   └──────────┘    │  /ingest     │    │  ┌─────────────┐  │    │
-  │     fetch()       │  /summarize  │    │  │ Scraper     │  │    │
-  │                    └──────────────┘    │  │ Summarizer  │  │    │
-  │                                        │  │ Q&A Agent   │  │    │
-  │                                        │  └─────────────┘  │    │
-  │                                        └───────────────────┘    │
-  │                              │                                   │
-  │                              ▼                                   │
-  │   ┌──────────────────────────────────────────────────────┐      │
-  │   │              RAG Pipeline                             │      │
-  │   │                                                       │      │
-  │   │  POST /ingest ──▶ Scrape ──▶ Chunk ──▶ Embed ──▶ DB  │      │
-  │   │                                                       │      │
-  │   │  POST /chat   ──▶ Embed Q ──▶ Search ──▶ LLM ──▶ Res │      │
-  │   └──────────────────────────────────────────────────────┘      │
-  │                              │                                   │
-  │                              ▼                                   │
-  │   ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐        │
-  │   │  Pinecone   │  │  ChromaDB   │  │  Weaviate/Qdrant│        │
-  │   │  (Cloud)    │  │  (Local)    │  │  (Self-hosted)  │        │
-  │   └─────────────┘  └─────────────┘  └─────────────────┘        │
-  │                                                                 │
-  └─────────────────────────────────────────────────────────────────┘
-`}</pre>
-    </div>
-  );
+  // ── DIRECT EXTRACT (bypass agent for speed) ──
+  const handleDirectExtract = async (type, query) => {
+    setStatus(ST.WORKING); setStatusLabel("Extracting…");
+    log(AGENTS.EXTRACTOR, "EXTRACT", `${type}: ${query}`);
+    try {
+      const r = await apiExtract(type, query);
+      setMessages(p => [...p, {
+        role:"assistant", content:r.result, agent:AGENTS.EXTRACTOR, ts:Date.now(),
+        exportData: r.export_data || null,
+      }]);
+      if (r.export_data?.length) {
+        setExportData(r.export_data);
+        log(AGENTS.EXPORT, "DATA_READY", `${r.export_data.length} records`);
+        refreshExports();
+      }
+    } catch (e) {
+      log(AGENTS.EXTRACTOR, "ERROR", e.message);
+      setMessages(p => [...p, { role:"system", content:`✗ ${e.message}`, agent:AGENTS.EXTRACTOR, ts:Date.now() }]);
+    }
+    setStatus(ST.IDLE); setStatusLabel("");
+  };
 
-  // ── Backend Status Badge ──────────────────────
-  const BackendBadge = () => {
-    const colors = {
-      online: { bg: "rgba(16,185,129,0.12)", text: "#10b981", dot: "#10b981" },
-      offline: { bg: "rgba(244,63,94,0.12)", text: "#f43f5e", dot: "#f43f5e" },
-      unknown: { bg: "var(--surface-2)", text: "var(--text-muted)", dot: "var(--text-muted)" },
-    };
-    const c = colors[backendStatus];
-    return (
-      <div
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "4px 10px",
-          borderRadius: 20,
-          fontSize: 10,
-          fontWeight: 600,
-          fontFamily: "'JetBrains Mono', monospace",
-          background: c.bg,
-          color: c.text,
-          cursor: "pointer",
-        }}
-        title={`Backend: ${API_BASE}`}
-        onClick={() =>
-          apiHealth()
-            .then(() => setBackendStatus("online"))
-            .catch(() => setBackendStatus("offline"))
-        }
-      >
-        <div
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            background: c.dot,
-          }}
-        />
-        {backendStatus === "online" ? "API Connected" : backendStatus === "offline" ? "API Offline" : "Checking..."}
+  // ── RENDER ──
+  return (<>
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Sora:wght@300;400;500;600;700;800&display=swap');
+      :root{--bg:#06080c;--s0:#0b0e14;--s1:#111620;--s2:#181e2a;--s3:#222936;--bdr:#1e2636;--bdr-a:#2e3a4e;--tx:#d4dae6;--tx2:#8892a6;--tx3:#505a6e;--cyan:#22d3ee;--cyan-d:rgba(34,211,238,.1);--violet:#a78bfa;--violet-d:rgba(167,139,250,.1);--amber:#fbbf24;--rose:#f472b6;--green:#34d399;--green-d:rgba(52,211,153,.1);--orange:#fb923c;--orange-d:rgba(251,146,60,.1)}
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:var(--bg);color:var(--tx);font-family:'Sora',sans-serif}
+      ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--s3);border-radius:3px}
+
+      .shell{display:grid;grid-template-columns:60px 220px 1fr 260px;height:100vh;overflow:hidden}
+
+      /* ICON BAR */
+      .ib{background:var(--s0);border-right:1px solid var(--bdr);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:4px}
+      .ib-logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(145deg,var(--cyan),var(--violet));display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#000;margin-bottom:18px;box-shadow:0 0 20px rgba(34,211,238,.2);font-family:'IBM Plex Mono',monospace}
+      .ib-btn{width:40px;height:40px;border-radius:10px;border:none;background:transparent;color:var(--tx3);font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:all .15s;font-family:'Sora'}
+      .ib-btn:hover{background:var(--s2);color:var(--tx2)}
+      .ib-btn.on{background:var(--cyan-d);color:var(--cyan)}
+      .ib-btn.on::before{content:'';position:absolute;left:-1px;top:50%;transform:translateY(-50%);width:3px;height:18px;background:var(--cyan);border-radius:0 2px 2px 0}
+      .ib-sp{flex:1}
+      .ib-dot{width:8px;height:8px;border-radius:50%;margin-bottom:8px}
+
+      /* LEFT PANEL */
+      .lp{background:var(--s0);border-right:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
+      .lp-hd{padding:18px 14px 10px;border-bottom:1px solid var(--bdr)}
+      .lp-t{font-size:13px;font-weight:700;letter-spacing:-.3px}
+      .lp-sub{font-size:9px;color:var(--tx3);font-family:'IBM Plex Mono',monospace;letter-spacing:.5px;margin-top:2px}
+      .lp-body{padding:10px 14px;flex:1;overflow-y:auto}
+      .lp-lbl{font-size:8px;text-transform:uppercase;letter-spacing:1.8px;color:var(--tx3);font-weight:600;margin:14px 0 6px;font-family:'IBM Plex Mono',monospace}
+      .lp-lbl:first-child{margin-top:0}
+      .ag-row{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:6px;font-size:11px;color:var(--tx2);cursor:default}
+      .ag-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+      .idx-row{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--tx3);word-break:break-all}
+      .idx-d{width:4px;height:4px;border-radius:50%;background:var(--green);flex-shrink:0}
+      .sys-box{font-size:10px;color:var(--tx3);font-family:'IBM Plex Mono',monospace;padding:8px;background:var(--s1);border-radius:6px;line-height:1.9}
+      .sys-box span{color:var(--cyan)}
+      .lp-btn{width:100%;padding:7px;border-radius:6px;border:1px solid var(--bdr);background:var(--s1);color:var(--tx2);font-size:10px;font-weight:600;cursor:pointer;font-family:'IBM Plex Mono',monospace;transition:all .15s;margin-top:4px;text-align:center}
+      .lp-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+      .lp-btn.grn:hover{border-color:var(--green);color:var(--green)}
+      .lp-btn.org:hover{border-color:var(--orange);color:var(--orange)}
+
+      /* MAIN */
+      .mn{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+      .mn-hd{display:flex;align-items:center;gap:2px;padding:0 18px;height:46px;border-bottom:1px solid var(--bdr);background:var(--s0);flex-shrink:0}
+      .mn-tab{padding:9px 14px;font-size:11px;font-weight:500;color:var(--tx3);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s;font-family:'Sora'}
+      .mn-tab:hover{color:var(--tx2)}.mn-tab.on{color:var(--cyan);border-bottom-color:var(--cyan)}
+      .mn-st{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:9px;font-family:'IBM Plex Mono',monospace;color:var(--tx3)}
+      .mn-dot{width:6px;height:6px;border-radius:50%}
+      @keyframes bk{0%,100%{opacity:1}50%{opacity:.3}}.bk{animation:bk 1s ease-in-out infinite}
+      .exp-bar{display:flex;gap:5px;margin-left:10px}
+      .exp-b{padding:4px 10px;border-radius:5px;border:1px solid var(--bdr);background:var(--s1);color:var(--tx2);font-size:9px;font-weight:600;cursor:pointer;font-family:'IBM Plex Mono',monospace;transition:all .15s}
+      .exp-b:hover{border-color:var(--green);color:var(--green);background:var(--green-d)}
+      .exp-b.dl{border-color:var(--orange);color:var(--orange)}.exp-b.dl:hover{background:var(--orange-d)}
+
+      /* CHAT */
+      .ch-scroll{flex:1;overflow-y:auto;padding:18px 22px;display:flex;flex-direction:column;gap:8px}
+      .msg{max-width:76%;padding:11px 15px;border-radius:14px;font-size:12.5px;line-height:1.7;word-wrap:break-word;white-space:pre-wrap;position:relative}
+      .msg.user{align-self:flex-end;background:linear-gradient(135deg,rgba(34,211,238,.14),rgba(167,139,250,.1));border:1px solid rgba(34,211,238,.18);border-bottom-right-radius:4px}
+      .msg.system,.msg.assistant{align-self:flex-start;background:var(--s1);border:1px solid var(--bdr);border-bottom-left-radius:4px}
+      .msg-tag{display:flex;align-items:center;gap:5px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:5px;font-family:'IBM Plex Mono',monospace}
+      .msg strong{font-weight:600}
+      .msg-acts{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+      .ma-btn{padding:3px 9px;border-radius:5px;border:1px solid var(--bdr);background:transparent;color:var(--tx3);font-size:8px;font-weight:600;cursor:pointer;font-family:'IBM Plex Mono',monospace;transition:all .15s;text-transform:uppercase;letter-spacing:.5px}
+      .ma-btn:hover{border-color:var(--green);color:var(--green)}
+      .ma-btn.dl:hover{border-color:var(--orange);color:var(--orange)}
+
+      .think{display:flex;gap:5px;padding:12px 16px;align-self:flex-start}
+      .think>div{width:7px;height:7px;border-radius:50%;background:var(--tx3);animation:bk 1.2s ease-in-out infinite}
+      .think>div:nth-child(2){animation-delay:.2s}.think>div:nth-child(3){animation-delay:.4s}
+
+      .ch-bar{padding:12px 18px;border-top:1px solid var(--bdr);background:var(--s0);display:flex;gap:8px;flex-shrink:0}
+      .ch-in{flex:1;padding:10px 14px;border-radius:10px;border:1px solid var(--bdr);background:var(--s1);color:var(--tx);font-size:12.5px;font-family:'Sora';outline:none;transition:border-color .15s}
+      .ch-in:focus{border-color:var(--cyan)}.ch-in::placeholder{color:var(--tx3)}
+      .ch-send{padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,var(--cyan),var(--violet));color:#000;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'Sora';transition:all .15s}
+      .ch-send:hover{filter:brightness(1.15)}.ch-send:disabled{opacity:.3;cursor:not-allowed}
+
+      /* INGEST */
+      .ing{flex:1;overflow-y:auto;padding:24px 28px}
+      .ing-t{font-size:16px;font-weight:700;margin-bottom:5px;letter-spacing:-.4px}
+      .ing-d{font-size:11px;color:var(--tx3);margin-bottom:18px;line-height:1.7}
+      .ing-ta{width:100%;min-height:120px;padding:12px;border-radius:10px;border:1px solid var(--bdr);background:var(--s1);color:var(--tx);font-size:11px;font-family:'IBM Plex Mono',monospace;outline:none;resize:vertical;line-height:1.8;transition:border-color .15s}
+      .ing-ta:focus{border-color:var(--cyan)}
+      .ing-acts{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+      .ing-btn{padding:10px 22px;border-radius:10px;border:1px solid var(--cyan);background:var(--cyan-d);color:var(--cyan);font-size:12px;font-weight:600;cursor:pointer;font-family:'Sora';transition:all .15s}
+      .ing-btn:hover{background:rgba(34,211,238,.2)}.ing-btn:disabled{opacity:.3;cursor:not-allowed}
+      .ing-btn.v{border-color:var(--violet);background:var(--violet-d);color:var(--violet)}.ing-btn.v:hover{background:rgba(167,139,250,.2)}
+      .ing-btn.g{border-color:var(--green);background:var(--green-d);color:var(--green)}.ing-btn.g:hover{background:rgba(52,211,153,.2)}
+      .ing-btn.o{border-color:var(--orange);background:var(--orange-d);color:var(--orange)}.ing-btn.o:hover{background:rgba(251,146,60,.2)}
+
+      .warn{background:rgba(244,114,182,.08);border:1px solid rgba(244,114,182,.2);border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:11px;color:var(--rose);font-family:'IBM Plex Mono',monospace}
+      .ing-src{margin-top:24px}
+      .src-row{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:6px;margin-bottom:3px;font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--tx3)}
+      .src-d{width:5px;height:5px;border-radius:50%;background:var(--green);flex-shrink:0}
+      .src-acts{margin-left:auto;display:flex;gap:4px}
+
+      /* DATA VIEW */
+      .dv{flex:1;overflow-y:auto;padding:24px 28px}
+      .card{background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:18px;margin-bottom:18px}
+      .card-t{font-size:12px;font-weight:600;margin-bottom:3px}.card-sub{font-size:9px;color:var(--tx3);font-family:'IBM Plex Mono',monospace;margin-bottom:14px}
+      .no-data{text-align:center;padding:50px 20px;color:var(--tx3);font-size:12px}.no-data-ic{font-size:36px;margin-bottom:10px;opacity:.3}
+
+      table.dt{width:100%;border-collapse:collapse;font-size:10px;font-family:'IBM Plex Mono',monospace}
+      table.dt th{padding:7px 10px;background:var(--s2);color:var(--cyan);text-align:left;border-bottom:1px solid var(--bdr);font-size:9px;letter-spacing:.5px;text-transform:uppercase}
+      table.dt td{padding:5px 10px;border-bottom:1px solid var(--bdr);color:var(--tx2)}
+
+      /* SERVER FILES */
+      .sf-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--s1);border-radius:6px;margin-bottom:3px;font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--tx2)}
+
+      /* RIGHT LOG */
+      .rp{background:var(--s0);border-left:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
+      .rp-hd{padding:12px 12px;border-bottom:1px solid var(--bdr);font-size:8px;text-transform:uppercase;letter-spacing:1.8px;color:var(--tx3);font-weight:600;font-family:'IBM Plex Mono',monospace}
+      .rp-sc{flex:1;overflow-y:auto;padding:8px}
+      .le{padding:7px 8px;border-radius:6px;margin-bottom:3px;background:var(--s1);border-left:3px solid var(--bdr)}
+      .le-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:1px}
+      .le-ag{font-size:9px;font-weight:700;display:flex;align-items:center;gap:4px;font-family:'IBM Plex Mono',monospace}
+      .le-tm{font-size:8px;color:var(--tx3);font-family:'IBM Plex Mono',monospace}
+      .le-act{font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;font-family:'IBM Plex Mono',monospace}
+      .le-det{font-size:9px;color:var(--tx3);margin-top:1px;word-break:break-word}
+      .le-empty{padding:20px 12px;text-align:center;color:var(--tx3);font-size:10px}
+
+      @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+      .msg{animation:fadeIn .2s ease-out}
+    `}</style>
+
+    <div className="shell">
+      {/* ICON BAR */}
+      <div className="ib">
+        <div className="ib-logo">R</div>
+        <button className={`ib-btn ${view==='chat'?'on':''}`} onClick={()=>setView('chat')} title="Chat">💬</button>
+        <button className={`ib-btn ${view==='ingest'?'on':''}`} onClick={()=>setView('ingest')} title="Ingest">🌐</button>
+        <button className={`ib-btn ${view==='data'?'on':''}`} onClick={()=>setView('data')} title="Data & Export">📊</button>
+        <div className="ib-sp"/>
+        <div className="ib-dot" style={{background:backend==='online'?'var(--green)':backend==='offline'?'var(--rose)':'var(--tx3)'}} title={`Backend: ${backend}`}/>
       </div>
-    );
-  };
 
-  return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap');
-
-        :root {
-          --bg: #0a0a0f;
-          --surface-0: #101018;
-          --surface-1: #16161f;
-          --surface-2: #1e1e2a;
-          --surface-3: #282838;
-          --border: #2a2a3a;
-          --border-active: #4a4a6a;
-          --text: #e8e8f0;
-          --text-secondary: #a0a0b8;
-          --text-muted: #606078;
-          --accent: #7c5cfc;
-          --accent-hover: #9078ff;
-          --accent-glow: rgba(124, 92, 252, 0.3);
-          --green: #10b981;
-          --amber: #f59e0b;
-          --rose: #f43f5e;
-          --blue: #3b82f6;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-          background: var(--bg);
-          color: var(--text);
-          font-family: 'Outfit', sans-serif;
-        }
-
-        .app-container {
-          display: grid;
-          grid-template-columns: 280px 1fr 260px;
-          height: 100vh;
-          max-height: 100vh;
-          overflow: hidden;
-        }
-
-        .sidebar-left {
-          background: var(--surface-0);
-          border-right: 1px solid var(--border);
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-        }
-
-        .sidebar-header {
-          padding: 20px 16px 16px;
-          border-bottom: 1px solid var(--border);
-        }
-
-        .logo {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          margin-bottom: 4px;
-        }
-
-        .logo-icon {
-          width: 36px;
-          height: 36px;
-          border-radius: 10px;
-          background: linear-gradient(135deg, var(--accent), #ec4899);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 18px;
-          box-shadow: 0 4px 16px var(--accent-glow);
-        }
-
-        .logo-text {
-          font-weight: 700;
-          font-size: 18px;
-          letter-spacing: -0.5px;
-        }
-
-        .logo-sub {
-          font-size: 11px;
-          color: var(--text-muted);
-          font-family: 'JetBrains Mono', monospace;
-          letter-spacing: 0.5px;
-          margin-top: 6px;
-          padding-left: 46px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-
-        .config-section {
-          padding: 16px;
-          flex: 1;
-          overflow-y: auto;
-        }
-
-        .config-label {
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 1.5px;
-          color: var(--text-muted);
-          font-weight: 600;
-          margin-bottom: 8px;
-          margin-top: 16px;
-        }
-
-        .config-label:first-child { margin-top: 0; }
-
-        .vdb-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 6px;
-        }
-
-        .vdb-option {
-          padding: 8px;
-          border-radius: 8px;
-          border: 1px solid var(--border);
-          background: var(--surface-1);
-          cursor: pointer;
-          text-align: center;
-          font-size: 12px;
-          transition: all 0.2s ease;
-          font-family: 'Outfit', sans-serif;
-          color: var(--text-secondary);
-        }
-
-        .vdb-option:hover { border-color: var(--border-active); }
-
-        .vdb-option.active {
-          border-color: var(--accent);
-          background: rgba(124, 92, 252, 0.08);
-          color: var(--text);
-        }
-
-        .vdb-icon { font-size: 18px; display: block; margin-bottom: 2px; }
-
-        .config-select, .config-input {
-          width: 100%;
-          padding: 8px 10px;
-          border-radius: 8px;
-          border: 1px solid var(--border);
-          background: var(--surface-1);
-          color: var(--text);
-          font-size: 13px;
-          font-family: 'Outfit', sans-serif;
-          outline: none;
-          transition: border-color 0.2s;
-        }
-
-        .config-select:focus, .config-input:focus {
-          border-color: var(--accent);
-        }
-
-        .config-select option { background: var(--surface-1); }
-
-        .config-row {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 8px;
-        }
-
-        .config-field label {
-          display: block;
-          font-size: 11px;
-          color: var(--text-muted);
-          margin-bottom: 4px;
-        }
-
-        .agent-list {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-
-        .agent-item {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          padding: 6px 8px;
-          border-radius: 6px;
-          font-size: 12px;
-          color: var(--text-secondary);
-        }
-
-        .agent-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          flex-shrink: 0;
-        }
-
-        .arch-btn {
-          width: 100%;
-          padding: 10px;
-          border-radius: 8px;
-          border: 1px dashed var(--border);
-          background: transparent;
-          color: var(--text-muted);
-          font-size: 12px;
-          cursor: pointer;
-          font-family: 'Outfit', sans-serif;
-          transition: all 0.2s;
-          margin-top: 12px;
-        }
-
-        .arch-btn:hover {
-          border-color: var(--accent);
-          color: var(--accent);
-        }
-
-        .main-area {
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-        }
-
-        .tabs-bar {
-          display: flex;
-          border-bottom: 1px solid var(--border);
-          background: var(--surface-0);
-          padding: 0 16px;
-        }
-
-        .tab {
-          padding: 12px 20px;
-          font-size: 13px;
-          font-weight: 500;
-          color: var(--text-muted);
-          cursor: pointer;
-          border: none;
-          background: none;
-          border-bottom: 2px solid transparent;
-          transition: all 0.2s;
-          font-family: 'Outfit', sans-serif;
-        }
-
-        .tab:hover { color: var(--text-secondary); }
-
-        .tab.active {
-          color: var(--text);
-          border-bottom-color: var(--accent);
-        }
-
-        .chat-area {
-          flex: 1;
-          overflow-y: auto;
-          padding: 20px;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .message {
-          max-width: 72%;
-          padding: 12px 16px;
-          border-radius: 14px;
-          font-size: 14px;
-          line-height: 1.6;
-          word-wrap: break-word;
-          white-space: pre-wrap;
-        }
-
-        .message.user {
-          align-self: flex-end;
-          background: var(--accent);
-          color: #fff;
-          border-bottom-right-radius: 4px;
-        }
-
-        .message.system, .message.assistant {
-          align-self: flex-start;
-          background: var(--surface-2);
-          color: var(--text);
-          border-bottom-left-radius: 4px;
-        }
-
-        .msg-agent-tag {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          font-size: 10px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.8px;
-          color: var(--text-muted);
-          margin-bottom: 6px;
-        }
-
-        .message strong { color: var(--accent-hover); font-weight: 600; }
-
-        .input-bar {
-          padding: 16px 20px;
-          border-top: 1px solid var(--border);
-          background: var(--surface-0);
-          display: flex;
-          gap: 8px;
-        }
-
-        .input-field {
-          flex: 1;
-          padding: 12px 16px;
-          border-radius: 12px;
-          border: 1px solid var(--border);
-          background: var(--surface-1);
-          color: var(--text);
-          font-size: 14px;
-          font-family: 'Outfit', sans-serif;
-          outline: none;
-          transition: border-color 0.2s;
-        }
-
-        .input-field:focus { border-color: var(--accent); }
-
-        .send-btn {
-          padding: 12px 24px;
-          border-radius: 12px;
-          border: none;
-          background: var(--accent);
-          color: #fff;
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          font-family: 'Outfit', sans-serif;
-          transition: all 0.2s;
-        }
-
-        .send-btn:hover { background: var(--accent-hover); }
-        .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-        .sources-area {
-          flex: 1;
-          overflow-y: auto;
-          padding: 24px;
-        }
-
-        .url-textarea {
-          width: 100%;
-          min-height: 120px;
-          padding: 14px;
-          border-radius: 12px;
-          border: 1px solid var(--border);
-          background: var(--surface-1);
-          color: var(--text);
-          font-size: 13px;
-          font-family: 'JetBrains Mono', monospace;
-          outline: none;
-          resize: vertical;
-          line-height: 1.7;
-        }
-
-        .url-textarea:focus { border-color: var(--accent); }
-
-        .ingest-btn {
-          margin-top: 12px;
-          padding: 12px 28px;
-          border-radius: 10px;
-          border: none;
-          background: var(--green);
-          color: #fff;
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          font-family: 'Outfit', sans-serif;
-          transition: all 0.2s;
-        }
-
-        .ingest-btn:hover { filter: brightness(1.1); }
-        .ingest-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-        .indexed-list {
-          margin-top: 24px;
-        }
-
-        .indexed-item {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          padding: 8px 12px;
-          background: var(--surface-1);
-          border-radius: 8px;
-          margin-bottom: 6px;
-          font-size: 12px;
-          font-family: 'JetBrains Mono', monospace;
-          color: var(--text-secondary);
-        }
-
-        .indexed-dot {
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-          background: var(--green);
-          flex-shrink: 0;
-        }
-
-        .sidebar-right {
-          background: var(--surface-0);
-          border-left: 1px solid var(--border);
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-        }
-
-        .log-header {
-          padding: 16px;
-          border-bottom: 1px solid var(--border);
-          font-size: 11px;
-          text-transform: uppercase;
-          letter-spacing: 1.2px;
-          color: var(--text-muted);
-          font-weight: 600;
-        }
-
-        .log-entries {
-          flex: 1;
-          overflow-y: auto;
-          padding: 12px;
-        }
-
-        .log-entry {
-          padding: 8px;
-          border-radius: 8px;
-          margin-bottom: 6px;
-          background: var(--surface-1);
-          border-left: 3px solid var(--border);
-        }
-
-        .log-entry-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          margin-bottom: 2px;
-        }
-
-        .log-agent {
-          font-size: 11px;
-          font-weight: 600;
-          display: flex;
-          align-items: center;
-          gap: 4px;
-        }
-
-        .log-time {
-          font-size: 10px;
-          color: var(--text-muted);
-          font-family: 'JetBrains Mono', monospace;
-        }
-
-        .log-action {
-          font-size: 10px;
-          color: var(--accent);
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-
-        .log-detail {
-          font-size: 11px;
-          color: var(--text-muted);
-          margin-top: 2px;
-        }
-
-        .status-pill {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 4px 12px;
-          border-radius: 20px;
-          font-size: 11px;
-          font-weight: 600;
-          font-family: 'JetBrains Mono', monospace;
-          margin-left: auto;
-        }
-
-        .status-pill.idle { background: var(--surface-2); color: var(--text-muted); }
-        .status-pill.active { background: rgba(124, 92, 252, 0.15); color: var(--accent); }
-
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
-
-        .pulse-dot {
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-          background: var(--accent);
-          animation: pulse 1.2s ease-in-out infinite;
-        }
-
-        .thinking-indicator {
-          display: flex;
-          gap: 4px;
-          padding: 12px 16px;
-          align-self: flex-start;
-        }
-
-        .thinking-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: var(--text-muted);
-          animation: pulse 1.2s ease-in-out infinite;
-        }
-
-        .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
-        .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
-
-        .code-area {
-          flex: 1;
-          overflow-y: auto;
-          padding: 24px;
-        }
-
-        .code-block {
-          background: var(--surface-1);
-          border: 1px solid var(--border);
-          border-radius: 12px;
-          overflow: hidden;
-          margin-bottom: 20px;
-        }
-
-        .code-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 10px 16px;
-          background: var(--surface-2);
-          border-bottom: 1px solid var(--border);
-          font-size: 12px;
-          font-family: 'JetBrains Mono', monospace;
-          color: var(--text-muted);
-        }
-
-        .code-content {
-          padding: 16px;
-          font-size: 12px;
-          font-family: 'JetBrains Mono', monospace;
-          line-height: 1.7;
-          color: var(--text-secondary);
-          overflow-x: auto;
-          white-space: pre;
-        }
-
-        .section-title {
-          font-size: 16px;
-          font-weight: 700;
-          margin-bottom: 16px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-
-        .section-desc {
-          font-size: 13px;
-          color: var(--text-muted);
-          margin-bottom: 16px;
-          line-height: 1.6;
-        }
-
-        .chat-area::-webkit-scrollbar,
-        .log-entries::-webkit-scrollbar,
-        .config-section::-webkit-scrollbar,
-        .sources-area::-webkit-scrollbar,
-        .code-area::-webkit-scrollbar {
-          width: 4px;
-        }
-
-        .chat-area::-webkit-scrollbar-thumb,
-        .log-entries::-webkit-scrollbar-thumb,
-        .config-section::-webkit-scrollbar-thumb,
-        .sources-area::-webkit-scrollbar-thumb,
-        .code-area::-webkit-scrollbar-thumb {
-          background: var(--surface-3);
-          border-radius: 4px;
-        }
-
-        .offline-banner {
-          background: rgba(244, 63, 94, 0.1);
-          border: 1px solid rgba(244, 63, 94, 0.25);
-          border-radius: 10px;
-          padding: 14px 18px;
-          margin-bottom: 12px;
-          font-size: 13px;
-          color: #fca5a5;
-          line-height: 1.6;
-        }
-
-        .offline-banner code {
-          background: rgba(255,255,255,0.08);
-          padding: 2px 6px;
-          border-radius: 4px;
-          font-family: 'JetBrains Mono', monospace;
-          font-size: 12px;
-        }
-      `}</style>
-
-      <div className="app-container">
-        {/* ── LEFT SIDEBAR ── */}
-        <div className="sidebar-left">
-          <div className="sidebar-header">
-            <div className="logo">
-              <div className="logo-icon">🤖</div>
-              <span className="logo-text">RAG Agent</span>
-            </div>
-            <div className="logo-sub">
-              <BackendBadge />
-            </div>
+      {/* LEFT PANEL */}
+      <div className="lp">
+        <div className="lp-hd">
+          <div className="lp-t">RAG Agent</div>
+          <div className="lp-sub">UNIVERSAL SCRAPER + EXTRACTOR</div>
+        </div>
+        <div className="lp-body">
+          <div className="lp-lbl">System</div>
+          <div className="sys-box">
+            Status: <span>{backend}</span><br/>
+            VectorDB: <span>{backendInfo.vector_db||'—'}</span><br/>
+            LLM: <span>{(backendInfo.llm_model||'—').split('/').pop()}</span><br/>
+            Tools: <span>{backendInfo.tools?.length||0}</span>
           </div>
 
-          <div className="config-section">
-            <div className="config-label">Vector Database</div>
-            <div className="vdb-grid">
-              {VECTOR_DBS.map((db) => (
-                <button
-                  key={db.id}
-                  className={`vdb-option ${selectedVectorDb === db.id ? "active" : ""}`}
-                  onClick={() => setSelectedVectorDb(db.id)}
-                >
-                  <span className="vdb-icon">{db.icon}</span>
-                  {db.name}
-                </button>
-              ))}
+          <div className="lp-lbl">Agents</div>
+          {Object.values(AGENTS).map(a=>(
+            <div key={a.id} className="ag-row">
+              <div className="ag-dot" style={{background:a.color}}/>{a.name}
+              <span style={{marginLeft:'auto',color:a.color,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{a.icon}</span>
             </div>
+          ))}
 
-            <div className="config-label">LLM Provider</div>
-            <select
-              className="config-select"
-              value={llmModel}
-              onChange={(e) => setLlmModel(e.target.value)}
-            >
-              <option value="gpt-4">OpenAI GPT-4</option>
-              <option value="gpt-3.5">OpenAI GPT-3.5</option>
-              <option value="claude-3">Claude 3 Sonnet</option>
-              <option value="llama-3">Llama 3 (Local)</option>
-            </select>
+          <div className="lp-lbl">Indexed ({indexedUrls.length})</div>
+          {!indexedUrls.length && <div style={{fontSize:10,color:'var(--tx3)',padding:'2px 8px'}}>No sources</div>}
+          {indexedUrls.slice(-6).map((u,i)=>(
+            <div key={i} className="idx-row"><div className="idx-d"/>{u.length>30?u.slice(0,30)+'…':u}</div>
+          ))}
+          {indexedUrls.length>6 && <div style={{fontSize:9,color:'var(--tx3)',padding:'2px 8px'}}>+{indexedUrls.length-6} more</div>}
 
-            <div className="config-label">Embedding Model</div>
-            <select
-              className="config-select"
-              value={embeddingModel}
-              onChange={(e) => setEmbeddingModel(e.target.value)}
-            >
-              <option value="openai">OpenAI Ada-002</option>
-              <option value="cohere">Cohere Embed v3</option>
-              <option value="huggingface">HuggingFace BGE</option>
-            </select>
+          <div className="lp-lbl">Quick Actions</div>
+          <button className="lp-btn grn" onClick={()=>{ if(exportData?.length) downloadCSV(exportData); }}>↓ Download CSV</button>
+          <button className="lp-btn org" onClick={()=>downloadFromServer("contacts_extracted.xlsx")}>↓ Download XLSX</button>
+          <button className="lp-btn" onClick={()=>handleDirectExtract("contacts","all")} disabled={status!==ST.IDLE||!indexedUrls.length}>⬡ Extract All Contacts</button>
+        </div>
+      </div>
 
-            <div className="config-label">Chunking</div>
-            <div className="config-row">
-              <div className="config-field">
-                <label>Chunk Size</label>
-                <input
-                  type="number"
-                  className="config-input"
-                  value={chunkSize}
-                  onChange={(e) => setChunkSize(Number(e.target.value))}
-                />
-              </div>
-              <div className="config-field">
-                <label>Overlap</label>
-                <input
-                  type="number"
-                  className="config-input"
-                  value={chunkOverlap}
-                  onChange={(e) => setChunkOverlap(Number(e.target.value))}
-                />
-              </div>
-            </div>
-
-            <div className="config-label">Active Agents</div>
-            <div className="agent-list">
-              {Object.values(AGENT_TYPES).map((agent) => (
-                <div key={agent.id} className="agent-item">
-                  <div className="agent-dot" style={{ background: agent.color }} />
-                  <span>{agent.icon}</span>
-                  <span>{agent.name}</span>
-                </div>
-              ))}
-            </div>
-
-            <button
-              className="arch-btn"
-              onClick={() => setShowArchitecture(!showArchitecture)}
-            >
-              {showArchitecture ? "Hide" : "Show"} Architecture Diagram
-            </button>
+      {/* MAIN */}
+      <div className="mn">
+        <div className="mn-hd">
+          <button className={`mn-tab ${view==='chat'?'on':''}`} onClick={()=>setView('chat')}>Chat</button>
+          <button className={`mn-tab ${view==='ingest'?'on':''}`} onClick={()=>setView('ingest')}>Ingest</button>
+          <button className={`mn-tab ${view==='data'?'on':''}`} onClick={()=>setView('data')}>Data</button>
+          <div className="mn-st">
+            <div className={`mn-dot ${status!==ST.IDLE?'bk':''}`} style={{background:status===ST.IDLE?'var(--green)':'var(--cyan)'}}/>
+            {status===ST.IDLE?'READY':statusLabel||'WORKING'}
+          </div>
+          <div className="exp-bar">
+            <button className="exp-b" onClick={()=>{ if(exportData?.length) downloadCSV(exportData); }}>CSV ↓</button>
+            <button className="exp-b dl" onClick={()=>downloadFromServer("contacts_extracted.csv")}>Server CSV ↓</button>
+            <button className="exp-b dl" onClick={()=>downloadFromServer("contacts_extracted.xlsx")}>XLSX ↓</button>
           </div>
         </div>
 
-        {/* ── MAIN ── */}
-        <div className="main-area">
-          <div className="tabs-bar">
-            <button
-              className={`tab ${activeTab === "chat" ? "active" : ""}`}
-              onClick={() => setActiveTab("chat")}
-            >
-              💬 Chat
-            </button>
-            <button
-              className={`tab ${activeTab === "sources" ? "active" : ""}`}
-              onClick={() => setActiveTab("sources")}
-            >
-              🌐 Sources
-            </button>
-            <button
-              className={`tab ${activeTab === "code" ? "active" : ""}`}
-              onClick={() => setActiveTab("code")}
-            >
-              🧩 Setup Guide
-            </button>
-            <div className={`status-pill ${status !== STATUS.IDLE ? "active" : "idle"}`}>
-              {status !== STATUS.IDLE && <div className="pulse-dot" />}
-              {status === STATUS.IDLE ? "Ready" : statusText || status}
-            </div>
-          </div>
-
-          {activeTab === "chat" && (
-            <>
-              <div className="chat-area">
-                {backendStatus === "offline" && (
-                  <div className="offline-banner">
-                    ⚠️ Backend is not reachable at <code>{API_BASE}</code>. Start
-                    the server first — see the <strong>Setup Guide</strong> tab for
-                    instructions. Click the status badge in the sidebar to retry.
+        {/* CHAT VIEW */}
+        {view==='chat' && (<>
+          <div className="ch-scroll">
+            {backend==='offline' && <div className="warn">⚠ Backend offline at {API} — start the server first.</div>}
+            {messages.map((m,i)=>(
+              <div key={i} className={`msg ${m.role}`}>
+                {m.agent && <div className="msg-tag" style={{color:m.agent.color}}>{m.agent.icon} {m.agent.name}</div>}
+                <div dangerouslySetInnerHTML={{__html: m.content.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\n/g,'<br/>')}}/>
+                {m.role==='assistant' && (
+                  <div className="msg-acts">
+                    <button className="ma-btn" onClick={()=>navigator.clipboard.writeText(m.content)}>COPY</button>
+                    {m.exportData?.length>0 && <>
+                      <button className="ma-btn" onClick={()=>downloadCSV(m.exportData,`extract_${Date.now()}.csv`)}>↓ CSV</button>
+                      <button className="ma-btn dl" onClick={()=>downloadFromServer("contacts_extracted.xlsx")}>↓ XLSX</button>
+                    </>}
                   </div>
                 )}
-                {showArchitecture && <ArchitectureDiagram />}
-                {messages.map((msg, i) => (
-                  <div key={i} className={`message ${msg.role}`}>
-                    {msg.agent && (
-                      <div className="msg-agent-tag">
-                        {msg.agent.icon} {msg.agent.name}
-                      </div>
-                    )}
-                    <div
-                      dangerouslySetInnerHTML={{
-                        __html: msg.content
-                          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-                          .replace(/\n/g, "<br/>"),
-                      }}
-                    />
+              </div>
+            ))}
+            {status===ST.WORKING && <div className="think"><div/><div/><div/></div>}
+            <div ref={chatEnd}/>
+          </div>
+          <div className="ch-bar">
+            <input className="ch-in" placeholder={backend==='offline'?"Start backend…":"Ask anything, extract data, or type a URL to scrape…"}
+              value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&!e.shiftKey&&handleSend()}
+              disabled={status!==ST.IDLE}/>
+            <button className="ch-send" onClick={handleSend} disabled={status!==ST.IDLE||!input.trim()}>Send</button>
+          </div>
+        </>)}
+
+        {/* INGEST VIEW */}
+        {view==='ingest' && (
+          <div className="ing">
+            <div className="ing-t">Scrape & Index Web Pages</div>
+            <div className="ing-d">
+              Paste URLs (one per line). The system scrapes each page, chunks content, generates embeddings, and stores them.
+              After indexing, you can extract emails, phone numbers, or any structured data.
+            </div>
+            {backend==='offline' && <div className="warn">⚠ Backend offline</div>}
+            <textarea className="ing-ta" placeholder={"https://example.com/contact\nhttps://example.com/team\nhttps://example.com/about"}
+              value={urls} onChange={e=>setUrls(e.target.value)} disabled={status!==ST.IDLE}/>
+            <div className="ing-acts">
+              <button className="ing-btn" onClick={handleIngest} disabled={status!==ST.IDLE||!urls.trim()}>
+                {status===ST.WORKING?'Working…':'◆ Scrape & Index'}
+              </button>
+              {urls.trim().split('\n').filter(Boolean).length===1 && (
+                <button className="ing-btn v" onClick={()=>{
+                  const u=urls.trim();
+                  apiSummarize(u).then(r=>setMessages(p=>[...p,{role:'assistant',content:`**Summary of ${u}:**\n\n${r.summary}`,agent:AGENTS.SUMMARIZER,ts:Date.now()}])).catch(()=>{});
+                }} disabled={status!==ST.IDLE}>◇ Summarize Only</button>
+              )}
+              <button className="ing-btn g" onClick={()=>handleDirectExtract("contacts","all")}
+                disabled={status!==ST.IDLE||!indexedUrls.length}>⬡ Extract All Contacts</button>
+              <button className="ing-btn o" onClick={()=>{
+                const q=prompt("What data to extract? (e.g. 'all product names and prices')");
+                if(q) handleDirectExtract("custom",q);
+              }} disabled={status!==ST.IDLE||!indexedUrls.length}>⬡ Custom Extract</button>
+            </div>
+
+            {indexedUrls.length>0 && (
+              <div className="ing-src">
+                <div className="lp-lbl">Indexed Sources ({indexedUrls.length})</div>
+                {indexedUrls.map((u,i)=>(
+                  <div key={i} className="src-row">
+                    <div className="src-d"/><span style={{flex:1}}>{u}</span>
+                    <div className="src-acts">
+                      <button className="ma-btn" onClick={()=>handleDirectExtract("contacts",u)} style={{fontSize:7}}>EXTRACT</button>
+                    </div>
                   </div>
                 ))}
-                {status === STATUS.THINKING && (
-                  <div className="thinking-indicator">
-                    <div className="thinking-dot" />
-                    <div className="thinking-dot" />
-                    <div className="thinking-dot" />
-                  </div>
-                )}
-                <div ref={chatEndRef} />
-              </div>
-              <div className="input-bar">
-                <input
-                  ref={inputRef}
-                  className="input-field"
-                  placeholder={
-                    backendStatus === "offline"
-                      ? "Start the backend server first..."
-                      : "Ask about your indexed content..."
-                  }
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-                  disabled={status !== STATUS.IDLE}
-                />
-                <button
-                  className="send-btn"
-                  onClick={handleSend}
-                  disabled={status !== STATUS.IDLE || !input.trim()}
-                >
-                  Send
-                </button>
-              </div>
-            </>
-          )}
-
-          {activeTab === "sources" && (
-            <div className="sources-area">
-              <div className="section-title">🌐 Add Website Sources</div>
-              <div className="section-desc">
-                Paste URLs below (one per line). The backend will scrape each page,
-                chunk the content, generate embeddings, and store them in your
-                configured vector database.
-              </div>
-              {backendStatus === "offline" && (
-                <div className="offline-banner" style={{ marginBottom: 16 }}>
-                  ⚠️ Backend offline — ingestion won't work until you start the
-                  server. See the <strong>Setup Guide</strong> tab.
-                </div>
-              )}
-              <textarea
-                className="url-textarea"
-                placeholder={
-                  "https://example.com/docs/intro\nhttps://example.com/docs/api\nhttps://example.com/about"
-                }
-                value={urls}
-                onChange={(e) => setUrls(e.target.value)}
-                disabled={status !== STATUS.IDLE}
-              />
-              <button
-                className="ingest-btn"
-                onClick={handleIngestUrls}
-                disabled={status !== STATUS.IDLE || !urls.trim()}
-              >
-                {status === STATUS.SCRAPING ? "Indexing..." : "🚀 Ingest & Index"}
-              </button>
-
-              {indexedUrls.length > 0 && (
-                <div className="indexed-list">
-                  <div className="config-label">
-                    Indexed Sources ({indexedUrls.length})
-                  </div>
-                  {indexedUrls.map((url, i) => (
-                    <div key={i} className="indexed-item">
-                      <div className="indexed-dot" />
-                      {url}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === "code" && (
-            <div className="code-area">
-              <div className="section-title">🧩 Backend Setup Guide</div>
-              <div className="section-desc">
-                Follow these steps to start the backend server that powers this UI.
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>Step 1 — Install dependencies</span>
-                  <span>Terminal</span>
-                </div>
-                <div className="code-content">{`# Clone or enter your project directory
-cd rag-agent
-
-# Create a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
-
-# Install Python packages
-pip install -r requirements.txt`}</div>
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>Step 2 — Set environment variables</span>
-                  <span>.env</span>
-                </div>
-                <div className="code-content">{`# Required
-OPENAI_API_KEY=sk-...
-
-# Optional overrides (defaults shown)
-LLM_MODEL=gpt-4
-LLM_TEMPERATURE=0
-EMBEDDING_MODEL=text-embedding-ada-002
-VECTOR_DB=chroma
-CHROMA_PERSIST_DIR=./chroma_db
-CHUNK_SIZE=512
-CHUNK_OVERLAP=50
-RETRIEVAL_K=5
-RETRIEVAL_FETCH_K=10
-
-# If using Pinecone instead of Chroma:
-# VECTOR_DB=pinecone
-# PINECONE_API_KEY=...
-# PINECONE_INDEX=rag-index
-
-# If using Weaviate:
-# VECTOR_DB=weaviate
-# WEAVIATE_URL=http://localhost:8080
-
-# If using Qdrant:
-# VECTOR_DB=qdrant
-# QDRANT_URL=http://localhost:6333`}</div>
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>Step 3 — Start the backend server</span>
-                  <span>Terminal</span>
-                </div>
-                <div className="code-content">{`# Start with hot-reload (development)
-uvicorn server:app --reload --port 8000
-
-# Or run directly
-python server.py
-
-# The API will be live at http://localhost:8000
-# Docs available at  http://localhost:8000/docs`}</div>
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>Step 4 — Start the frontend</span>
-                  <span>Terminal (separate tab)</span>
-                </div>
-                <div className="code-content">{`# From the frontend project directory
-npm install
-npm run dev
-
-# Opens at http://localhost:5173 (Vite) or :3000 (CRA)
-# The frontend calls http://localhost:8000 by default.
-# To change, edit the API_BASE constant at the top of
-# MultiAgentRAGChatbot.jsx`}</div>
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>API Endpoints</span>
-                  <span>Reference</span>
-                </div>
-                <div className="code-content">{`POST /chat
-  Body:    { "message": "What is RAG?" }
-  Returns: { "response": "...", "intermediate_steps": [...] }
-
-POST /ingest
-  Body:    { "urls": ["https://example.com/page1", ...] }
-  Returns: { "status": "ok", "detail": "Indexed 24 chunks from 2 URL(s)." }
-
-POST /summarize
-  Body:    { "url": "https://example.com/page1" }
-  Returns: { "summary": "..." }
-
-GET /health
-  Returns: { "status": "healthy", "vector_db": "chroma", "llm_model": "gpt-4" }
-
-WS  /ws/chat
-  Send:    { "message": "..." }
-  Receive: { "type": "status", "status": "thinking" }
-           { "type": "response", "response": "...", "intermediate_steps": [...] }`}</div>
-              </div>
-
-              <div className="code-block">
-                <div className="code-header">
-                  <span>requirements.txt</span>
-                  <span>Python</span>
-                </div>
-                <div className="code-content">{`langchain>=0.2.0
-langchain-openai
-langchain-community
-chromadb
-pinecone-client
-beautifulsoup4
-fastapi
-uvicorn
-python-dotenv
-unstructured
-tiktoken
-sentence-transformers
-websockets`}</div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* ── RIGHT SIDEBAR — AGENT LOG ── */}
-        <div className="sidebar-right">
-          <div className="log-header">Agent Activity Log</div>
-          <div className="log-entries">
-            {agentLog.length === 0 && (
-              <div
-                style={{
-                  padding: 16,
-                  textAlign: "center",
-                  color: "var(--text-muted)",
-                  fontSize: 12,
-                }}
-              >
-                Agent actions will appear here as you interact with the system.
               </div>
             )}
-            {agentLog
-              .slice()
-              .reverse()
-              .map((entry, i) => (
-                <div
-                  key={i}
-                  className="log-entry"
-                  style={{ borderLeftColor: entry.agent.color }}
-                >
-                  <div className="log-entry-header">
-                    <div className="log-agent" style={{ color: entry.agent.color }}>
-                      {entry.agent.icon} {entry.agent.name}
-                    </div>
-                    <div className="log-time">{entry.time}</div>
-                  </div>
-                  <div className="log-action">{entry.action}</div>
-                  <div className="log-detail">{entry.detail}</div>
-                </div>
-              ))}
           </div>
+        )}
+
+        {/* DATA VIEW */}
+        {view==='data' && (
+          <div className="dv">
+            <div className="ing-t">Extracted Data & Exports</div>
+            <div className="ing-d">Data extracted from scraped content. Download as CSV or XLSX.</div>
+
+            {exportData?.length ? (<>
+              {/* Chart */}
+              {chartData.length>=1 && (
+                <div className="card">
+                  <div className="card-t">Data Breakdown</div>
+                  <div className="card-sub">{chartData.length} categories</div>
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1e2636"/>
+                      <XAxis dataKey="name" tick={{fill:'#505a6e',fontSize:9}}/>
+                      <YAxis tick={{fill:'#505a6e',fontSize:9}}/>
+                      <Tooltip contentStyle={{background:'#111620',border:'1px solid #1e2636',borderRadius:8,fontSize:11,color:'#d4dae6'}}/>
+                      <Bar dataKey="value" radius={[4,4,0,0]}>
+                        {chartData.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* Table */}
+              <div className="card">
+                <div className="card-t">Extracted Records ({exportData.length})</div>
+                <div className="card-sub">Scroll to view all • Click buttons below to export</div>
+                <div style={{overflowX:'auto',maxHeight:400,overflowY:'auto'}}>
+                  <table className="dt">
+                    <thead><tr>{Object.keys(exportData[0]).map(h=><th key={h}>{h}</th>)}</tr></thead>
+                    <tbody>{exportData.map((r,i)=>(
+                      <tr key={i}>{Object.values(r).map((v,j)=><td key={j}>{String(v)}</td>)}</tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+                <div style={{display:'flex',gap:8,marginTop:14}}>
+                  <button className="ing-btn g" onClick={()=>downloadCSV(exportData)}>↓ Download CSV</button>
+                  <button className="ing-btn o" onClick={()=>downloadFromServer("contacts_extracted.xlsx")}>↓ Download XLSX</button>
+                  <button className="ing-btn" onClick={()=>downloadFromServer("custom_extraction.csv")}>↓ Custom CSV</button>
+                </div>
+              </div>
+            </>) : (
+              <div className="no-data">
+                <div className="no-data-ic">📊</div>
+                No extracted data yet.<br/>
+                <span style={{fontSize:10,marginTop:6,display:'block'}}>
+                  Scrape URLs → then ask "extract every email and phone number" or use the Extract buttons.
+                </span>
+              </div>
+            )}
+
+            {/* Server-side export files */}
+            <div style={{marginTop:20}}>
+              <div className="lp-lbl" style={{display:'flex',alignItems:'center',gap:8}}>
+                Server Export Files
+                <button className="ma-btn" onClick={refreshExports} style={{fontSize:7}}>REFRESH</button>
+              </div>
+              {serverExports.length ? serverExports.map((f,i)=>(
+                <div key={i} className="sf-row">
+                  <span>{f}</span>
+                  <button className="ma-btn dl" onClick={()=>downloadFromServer(f)}>↓</button>
+                </div>
+              )) : <div style={{fontSize:10,color:'var(--tx3)',padding:'4px 0'}}>No files yet — extract data first</div>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* RIGHT LOG */}
+      <div className="rp">
+        <div className="rp-hd">Agent Activity</div>
+        <div className="rp-sc">
+          {!logs.length && <div className="le-empty">Actions appear here as agents run.</div>}
+          {logs.slice().reverse().map((e,i)=>(
+            <div key={i} className="le" style={{borderLeftColor:e.agent.color}}>
+              <div className="le-hd">
+                <div className="le-ag" style={{color:e.agent.color}}>{e.agent.icon} {e.agent.name}</div>
+                <div className="le-tm">{e.time}</div>
+              </div>
+              <div className="le-act" style={{color:e.agent.color}}>{e.action}</div>
+              <div className="le-det">{e.detail}</div>
+            </div>
+          ))}
         </div>
       </div>
-    </>
-  );
+    </div>
+  </>);
 }
